@@ -53,7 +53,7 @@ from .plex_client import retry_plex_call
 class CodecNotSupportedError(Exception):
     """
     Exception raised when a video codec is not supported by GPU hardware.
-    
+
     This exception signals that the file should be processed by a CPU worker
     instead of attempting CPU fallback within the GPU worker thread.
     """
@@ -63,7 +63,7 @@ class CodecNotSupportedError(Exception):
 def parse_ffmpeg_progress_line(line: str, total_duration: float, progress_callback=None):
     """
     Parse a single FFmpeg progress line and call progress callback if provided.
-    
+
     Args:
         line: FFmpeg output line to parse
         total_duration: Total video duration in seconds
@@ -76,7 +76,7 @@ def parse_ffmpeg_progress_line(line: str, total_duration: float, progress_callba
             hours, minutes, seconds = duration_match.groups()
             return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
         return total_duration
-    
+
     # Parse FFmpeg progress line with all data
     elif 'time=' in line:
         # Extract all FFmpeg data fields
@@ -87,7 +87,7 @@ def parse_ffmpeg_progress_line(line: str, total_duration: float, progress_callba
         time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2}\.\d{2})', line)
         bitrate_match = re.search(r'bitrate=\s*([0-9.]+)kbits/s', line)
         speed_match = re.search(r'speed=\s*([0-9]+\.?[0-9]*|\.[0-9]+)x', line)
-        
+
         # Extract values
         frame = int(frame_match.group(1)) if frame_match else 0
         fps = float(fps_match.group(1)) if fps_match else 0
@@ -95,48 +95,48 @@ def parse_ffmpeg_progress_line(line: str, total_duration: float, progress_callba
         size = int(size_match.group(1)) if size_match else 0
         bitrate = float(bitrate_match.group(1)) if bitrate_match else 0
         speed = speed_match.group(1) + "x" if speed_match else None
-        
+
         if time_match:
             hours, minutes, seconds = time_match.groups()
             current_time = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
             time_str = f"{hours}:{minutes}:{seconds}"
-            
+
             # Update progress
             progress_percent = 0
             if total_duration and total_duration > 0:
                 progress_percent = min(100, int((current_time / total_duration) * 100))
-            
+
             # Calculate remaining time from FFmpeg data
             remaining_time = 0
             if total_duration and total_duration > 0 and current_time < total_duration:
                 remaining_time = total_duration - current_time
-            
+
             # Call progress callback with all FFmpeg data
             if progress_callback:
-                progress_callback(progress_percent, current_time, total_duration, speed or "0.0x", 
+                progress_callback(progress_percent, current_time, total_duration, speed or "0.0x",
                                 remaining_time, frame, fps, q, size, time_str, bitrate)
-    
+
     return total_duration
 
 
 def _detect_codec_error(returncode: int, stderr_lines: List[str]) -> bool:
     """
     Detect if FFmpeg failure is due to unsupported codec/hardware decoder error.
-    
+
     Checks exit codes and stderr patterns to identify codec-related errors.
     Based on FFmpeg documentation: exit code -22 (EINVAL) and 69 (max error rate)
     are common for unsupported codecs, but stderr parsing is more reliable.
-    
+
     Args:
         returncode: FFmpeg exit code
         stderr_lines: List of stderr output lines (case-insensitive matching)
-        
+
     Returns:
         bool: True if codec/decoder error detected, False otherwise
     """
     # Combine all stderr lines into a single lowercase string for pattern matching
     stderr_text = ' '.join(stderr_lines).lower()
-    
+
     # Pattern list for codec/decoder errors (based on FFmpeg documentation and common error messages)
     # Focus ONLY on errors that indicate the codec is not supported by the hardware decoder
     # Avoid patterns that could indicate other issues (corruption, memory, permissions, etc.)
@@ -156,12 +156,12 @@ def _detect_codec_error(returncode: int, stderr_lines: List[str]) -> bool:
         'unsupported codec',
         'codec not supported',
     ]
-    
+
     # Check for codec error patterns in stderr (primary detection method)
     for pattern in codec_error_patterns:
         if pattern in stderr_text:
             return True
-    
+
     # Check exit codes that may indicate codec issues
     # -22 (EINVAL) - invalid argument, often codec-related
     # 234 (wrapped -22 on Unix systems)
@@ -173,7 +173,7 @@ def _detect_codec_error(returncode: int, stderr_lines: List[str]) -> bool:
         if returncode in [-22, 234, 69]:
             return True
         # For other non-zero codes, rely on stderr patterns (already checked above)
-    
+
     return False
 
 
@@ -207,15 +207,16 @@ def heuristic_allows_skip(ffmpeg_path: str, video_file: str) -> bool:
     return ok
 
 
-def generate_images(video_file: str, output_folder: str, gpu: Optional[str], 
-                   gpu_device_path: Optional[str], config: Config, progress_callback=None) -> tuple:
+def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
+                   gpu_device_path: Optional[str], config: Config, progress_callback=None,
+                   media_info: Optional['MediaInfo'] = None) -> tuple:
     """
     Generate thumbnail images from a video using FFmpeg.
 
     Runs FFmpeg with hardware acceleration when configured. If the skip-frame
     heuristic allowed it, attempts with '-skip_frame:v nokey' first. If that
     yields zero images or returns non-zero, automatically retries without '-skip_frame'.
-    
+
     If GPU processing fails with a codec error (detected via stderr parsing for
     patterns like "Codec not supported", "Unsupported codec", etc., or exit codes
     -22/EINVAL or 69/max error rate) and CPU threads are available, automatically
@@ -239,9 +240,10 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
             seconds (float): Elapsed processing time (last attempt)
             speed (str): Reported or computed FFmpeg speed string
     """
-    media_info = MediaInfo.parse(video_file)
+    if media_info is None:
+        media_info = MediaInfo.parse(video_file)
     fps_value = round(1 / config.plex_bif_frame_interval, 6)
-    
+
     # Base video filter for SDR content
     base_scale = "scale=w=320:h=240:force_original_aspect_ratio=decrease"
     vf_parameters = f"fps=fps={fps_value}:round=up,{base_scale}"
@@ -250,7 +252,7 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
     if media_info.video_tracks:
         if media_info.video_tracks[0].hdr_format != "None" and media_info.video_tracks[0].hdr_format is not None:
             vf_parameters = f"fps=fps={fps_value}:round=up,zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,{base_scale}"
-    
+
     def _run_ffmpeg(use_skip: bool, gpu_override: Optional[str] = None, gpu_device_path_override: Optional[str] = None) -> tuple:
         """Run FFmpeg once and return (returncode, seconds, speed, stderr_lines)."""
         # Build FFmpeg command with proper argument ordering
@@ -264,7 +266,7 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
         # Allow overriding GPU settings for CPU fallback
         effective_gpu = gpu_override if gpu_override is not None else gpu
         effective_gpu_device_path = gpu_device_path_override if gpu_device_path_override is not None else gpu_device_path
-        
+
         use_gpu = effective_gpu is not None
         if use_gpu:
             if effective_gpu == 'NVIDIA':
@@ -288,6 +290,9 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
             f'{output_folder}/img-%06d.jpg'
         ]
 
+        if config.regenerate_thumbnails:
+            args += ["-y"]
+
         start_local = time.time()
         logger.debug(f'Executing: {" ".join(args)}')
 
@@ -307,13 +312,13 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
         ffmpeg_output_lines = []
         line_count = 0
 
-        def speed_capture_callback(progress_percent, current_duration, total_duration_param, speed_value, 
+        def speed_capture_callback(progress_percent, current_duration, total_duration_param, speed_value,
                                   remaining_time=None, frame=0, fps=0, q=0, size=0, time_str="00:00:00.00", bitrate=0):
             nonlocal speed_local
             if speed_value and speed_value != "0.0x":
                 speed_local = speed_value
             if progress_callback:
-                progress_callback(progress_percent, current_duration, total_duration_param, speed_value, 
+                progress_callback(progress_percent, current_duration, total_duration_param, speed_value,
                                 remaining_time, frame, fps, q, size, time_str, bitrate, media_file=video_file)
 
         time.sleep(0.02)
@@ -355,7 +360,7 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
         # Error logging
         if proc.returncode != 0:
             logger.error(f'FFmpeg failed with return code {proc.returncode} for {video_file}')
-            
+
             # Check for permission-related errors in FFmpeg output
             # FFmpeg outputs "Permission denied" in messages like "av_interleaved_write_frame(): Permission denied"
             # We use lowercase for case-insensitive matching
@@ -367,7 +372,7 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
                     if keyword.lower() in line_lower:
                         permission_errors.append(line.strip())
                         break
-            
+
             # Log permission errors at INFO level so users can see them without DEBUG
             if permission_errors:
                 logger.info(f'Permission error detected while processing {video_file}:')
@@ -375,7 +380,7 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
                     logger.info(f'  {error_line}')
                 if len(permission_errors) > 3:
                     logger.info(f'  ... and {len(permission_errors) - 3} more permission-related error(s)')
-            
+
             # Always log full FFmpeg output at DEBUG level for detailed troubleshooting
             if logger.level("DEBUG").no <= logger._core.min_level:
                 logger.debug(f"FFmpeg output ({len(ffmpeg_output_lines)} lines):")
@@ -405,7 +410,7 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
     did_retry = False
     retry_rc = rc
     retry_stderr_lines = stderr_lines
-    
+
     if rc != 0 and use_skip_initial:
         did_retry = True
         logger.warning(f"No thumbnails generated from {video_file} with -skip_frame; retrying without skip-frame")
@@ -419,7 +424,7 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
         # Update rc and stderr_lines to retry results for codec error detection
         rc = retry_rc
         stderr_lines = retry_stderr_lines
-    
+
     # Count images first to see if we have any (even if rc != 0, we might have partial success)
     image_count = len(glob.glob(os.path.join(output_folder, 'img*.jpg')))
 
@@ -474,34 +479,35 @@ def generate_images(video_file: str, output_folder: str, gpu: Optional[str],
     return success, image_count, hw, seconds, speed
 
 
-def _setup_bundle_paths(bundle_hash: str, config: Config) -> Tuple[str, str, str]:
+def _setup_bundle_paths(bundle_hash: str, config: Config) -> Tuple[str, str, str, str]:
     """
     Set up all bundle-related paths.
-    
+
     Args:
         bundle_hash: Bundle hash from Plex
         config: Configuration object
-        
+
     Returns:
-        Tuple of (indexes_path, index_bif, tmp_path)
+        Tuple of (indexes_path, index_bif, tmp_path, chapters_path)
     """
     bundle_file = sanitize_path(f'{bundle_hash[0]}/{bundle_hash[1::1]}.bundle')
     bundle_path = sanitize_path(os.path.join(config.plex_config_folder, 'Media', 'localhost', bundle_file))
     indexes_path = sanitize_path(os.path.join(bundle_path, 'Contents', 'Indexes'))
     index_bif = sanitize_path(os.path.join(indexes_path, 'index-sd.bif'))
     tmp_path = sanitize_path(os.path.join(config.working_tmp_folder, bundle_hash))
-    return indexes_path, index_bif, tmp_path
+    chapters_path = sanitize_path(os.path.join(bundle_path, 'Contents', 'Chapters'))
+    return indexes_path, index_bif, tmp_path, chapters_path
 
 
 def _ensure_directories(indexes_path: str, tmp_path: str, media_file: str) -> bool:
     """
     Ensure required directories exist.
-    
+
     Args:
         indexes_path: Path to indexes directory
         tmp_path: Path to temporary directory
         media_file: Media file path for error messages
-        
+
     Returns:
         True if directories are ready, False if creation failed
     """
@@ -515,7 +521,7 @@ def _ensure_directories(indexes_path: str, tmp_path: str, media_file: str) -> bo
         except OSError as e:
             logger.error(f'Error generating images for {media_file}. `{type(e).__name__}:{str(e)}` error when creating index path {indexes_path}')
             return False
-    
+
     if not os.path.isdir(tmp_path):
         try:
             os.makedirs(tmp_path)
@@ -526,14 +532,14 @@ def _ensure_directories(indexes_path: str, tmp_path: str, media_file: str) -> bo
         except OSError as e:
             logger.error(f'Error generating images for {media_file}. `{type(e).__name__}:{str(e)}` error when creating tmp path {tmp_path}')
             return False
-    
+
     return True
 
 
 def _cleanup_temp_directory(tmp_path: str) -> None:
     """
     Clean up temporary directory, logging warnings on failure.
-    
+
     Args:
         tmp_path: Path to temporary directory
     """
@@ -544,12 +550,13 @@ def _cleanup_temp_directory(tmp_path: str) -> None:
         logger.warning(f"Failed to clean up temp directory {tmp_path}: {cleanup_error}")
 
 
-def _generate_and_save_bif(media_file: str, tmp_path: str, index_bif: str, 
-                           gpu: Optional[str], gpu_device_path: Optional[str], 
-                           config: Config, progress_callback=None) -> None:
+def _generate_and_save_bif(media_file: str, tmp_path: str, index_bif: str,
+                           gpu: Optional[str], gpu_device_path: Optional[str],
+                           config: Config, progress_callback=None,
+                           media_info: Optional['MediaInfo'] = None) -> None:
     """
     Generate images and create BIF file.
-    
+
     Args:
         media_file: Path to media file
         tmp_path: Temporary directory for images
@@ -558,13 +565,13 @@ def _generate_and_save_bif(media_file: str, tmp_path: str, index_bif: str,
         gpu_device_path: GPU device path
         config: Configuration object
         progress_callback: Callback function for progress updates
-        
+
     Raises:
         CodecNotSupportedError: If codec is not supported by GPU
         RuntimeError: If thumbnail generation produced 0 images
     """
     try:
-        gen_result = generate_images(media_file, tmp_path, gpu, gpu_device_path, config, progress_callback)
+        gen_result = generate_images(media_file, tmp_path, gpu, gpu_device_path, config, progress_callback, media_info=media_info)
     except CodecNotSupportedError:
         # Clean up temp directory before re-raising
         _cleanup_temp_directory(tmp_path)
@@ -573,7 +580,7 @@ def _generate_and_save_bif(media_file: str, tmp_path: str, index_bif: str,
         logger.error(f'Error generating images for {media_file}. `{type(e).__name__}:{str(e)}` error when generating images')
         _cleanup_temp_directory(tmp_path)
         raise RuntimeError(f"Failed to generate images: {e}")
-    
+
     # Determine image count from result or by scanning
     image_count = 0
     if isinstance(gen_result, tuple) and len(gen_result) >= 2:
@@ -581,12 +588,12 @@ def _generate_and_save_bif(media_file: str, tmp_path: str, index_bif: str,
     else:
         if os.path.isdir(tmp_path):
             image_count = len(glob.glob(os.path.join(tmp_path, '*.jpg')))
-    
+
     if image_count == 0:
         logger.error(f'No thumbnails generated for {media_file}; skipping BIF creation')
         _cleanup_temp_directory(tmp_path)
         raise RuntimeError(f"Thumbnail generation produced 0 images for {media_file}")
-    
+
     # Generate BIF file
     try:
         generate_bif(index_bif, tmp_path, config)
@@ -615,12 +622,12 @@ def _generate_and_save_bif(media_file: str, tmp_path: str, index_bif: str,
 def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
     """
     Build a .bif file from thumbnail images.
-    
+
     Args:
         bif_filename: Path to output .bif file
         images_path: Directory containing .jpg thumbnail images
         config: Configuration object
-        
+
     Raises:
         PermissionError: If permission denied accessing files or directories
     """
@@ -641,7 +648,7 @@ def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
         logger.error(f'Permission denied writing BIF file {bif_filename}: {e}')
         logger.info(f'Please check write permissions for: {os.path.dirname(bif_filename)}')
         raise
-    
+
     try:
         with f:
             array.array('B', magic).tofile(f)
@@ -686,11 +693,317 @@ def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
     logger.debug(f'Generated BIF file: {bif_filename}')
 
 
-def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[str], 
+def generate_chapter_thumbnails(
+    video_file: str,
+    chapter_offsets: List[float],
+    chapters_path: str,
+    gpu: Optional[str],
+    gpu_device_path: Optional[str],
+    config: Config,
+    progress_callback=None,
+    media_info: Optional['MediaInfo'] = None,
+) -> None:
+    """
+    Generate HDR-tonemapped chapter thumbnails as JPEGs in the Plex bundle.
+
+    Args:
+        video_file: Path to media file
+        chapter_offsets: List of chapter start times in seconds
+        chapters_path: Plex bundle 'Contents/Chapters' directory
+        gpu: GPU type ('NVIDIA', 'AMD', etc.) or None
+        gpu_device_path: GPU device path (e.g. /dev/dri/renderD128) or None
+        config: Configuration object
+        progress_callback: Optional callback for progress reporting
+    """
+    if not chapter_offsets:
+        logger.debug(f"No chapters found for {video_file}; skipping chapter thumbnails")
+        return
+
+    # Ensure directory
+    try:
+        os.makedirs(chapters_path, exist_ok=True)
+    except PermissionError as e:
+        logger.error(f"Permission denied creating chapters directory {chapters_path}: {e}")
+        return
+
+    # Regeneration policy:
+    # - If --regenerate-thumbnails is set, remove existing chapter images for this item.
+    # - Otherwise, keep existing chapter images and only generate missing ones.
+    if config.regenerate_thumbnails:
+        try:
+            removed = 0
+            # Plex may store chapter thumbs as .jpg or .jpeg depending on version/platform
+            patterns = ['*.jpg', '*.jpeg', '*.JPG', '*.JPEG']
+            for pat in patterns:
+                for p in glob.glob(os.path.join(chapters_path, pat)):
+                    try:
+                        os.remove(p)
+                        removed += 1
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(
+                f"Chapter thumbnails: error {type(e).__name__} while deleting existing thumbnails for {video_file}: {e}"
+            )
+
+
+    if media_info is None:
+        media_info = MediaInfo.parse(video_file)
+
+    # Duration (seconds) for clamping chapter thumb timestamps.
+    duration_s = None
+    try:
+        if getattr(media_info, 'general_tracks', None) and media_info.general_tracks:
+            d = getattr(media_info.general_tracks[0], 'duration', None)
+            if d is not None:
+                duration_s = float(d) / 1000.0
+        if duration_s is None and getattr(media_info, 'video_tracks', None) and media_info.video_tracks:
+            d = getattr(media_info.video_tracks[0], 'duration', None)
+            if d is not None:
+                duration_s = float(d) / 1000.0
+    except Exception:
+        duration_s = None
+
+    # Keep a small safety margin so we don't seek past EOF.
+    duration_margin_s = 0.10
+
+    # Base scale (same as generate_images)
+    base_scale = "scale=w=1280:h=720:force_original_aspect_ratio=decrease:flags=lanczos"
+    vf_parameters = base_scale
+
+    # Mirror the HDR handling used in generate_images EXACTLY (same filter chain, minus fps)
+    is_hdr = False
+    hdr_format = None
+    if media_info.video_tracks:
+        hdr_format = media_info.video_tracks[0].hdr_format
+        # Sometimes this is the literal string "None"
+        if hdr_format != "None" and hdr_format is not None:
+            is_hdr = True
+            vf_parameters = (
+                "zscale=t=linear:npl=100,format=gbrpf32le,"
+                "zscale=p=bt709,"
+                "tonemap=tonemap=mobius:desat=0,"
+                "zscale=t=bt709:m=bt709:r=tv,"
+                f"format=yuv420p,{base_scale}"
+            )
+    logger.debug(
+        f"Chapter thumbs HDR detect: is_hdr={is_hdr} hdr_format={hdr_format} file={video_file}"
+    )
+
+    quality = str(config.thumbnail_quality)
+
+    # For single-frame extractions, the skip-frame heuristic is less useful,
+    # but it can still reduce work when the seek lands on keyframes.
+    allow_skip = heuristic_allows_skip(config.ffmpeg_path, video_file)
+
+    def _build_ffmpeg_args(use_skip: bool, effective_gpu: Optional[str], effective_gpu_device_path: Optional[str], ts: float, out_file: str, use_sseof: bool = False) -> List[str]:
+        # Hardware accel flags must come before -i
+        args: List[str] = [
+            config.ffmpeg_path,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-threads:v", "1",
+        ]
+
+        # Prevent FFmpeg from prompting on existing outputs.
+        # - When regenerating, overwrite outputs.
+        # - Otherwise, refuse to overwrite.
+        if config.regenerate_thumbnails:
+            args += ["-y"]
+        else:
+            args += ["-n"]
+
+        if effective_gpu is not None:
+            if effective_gpu == 'NVIDIA':
+                args += ["-hwaccel", "cuda"]
+            elif effective_gpu == 'WINDOWS_GPU':
+                args += ["-hwaccel", "d3d11va"]
+            elif effective_gpu == 'APPLE':
+                args += ["-hwaccel", "videotoolbox"]
+            elif effective_gpu_device_path and effective_gpu_device_path.startswith('/dev/dri/'):
+                args += ["-hwaccel", "vaapi", "-vaapi_device", effective_gpu_device_path]
+
+        if use_skip:
+            args += ["-skip_frame:v", "nokey"]
+
+        # Seek strategy:
+        # - Default: fast seek with -ss before -i.
+        # - Near/at EOF (last chapter): use -sseof to guarantee we land on decodable frames.
+        if use_sseof:
+            # Half a second before EOF is usually safe even when the final chapter is exactly at the end.
+            args += [
+                "-sseof", "-0.5",
+                "-i", video_file,
+            ]
+        else:
+            args += [
+                "-ss", f"{ts:.3f}",
+                "-i", video_file,
+            ]
+
+        args += [
+            "-an", "-sn", "-dn",
+            "-frames:v", "1",
+            "-vf", vf_parameters,
+            "-q:v", quality,
+            out_file,
+        ]
+        return args
+
+    written = 0
+    skipped_existing = 0
+    failed = 0
+
+    total = len(chapter_offsets)
+
+    def _format_hhmmss(seconds: float) -> str:
+        if seconds is None or seconds < 0:
+            seconds = 0.0
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds % 60
+        return f"{h:02d}:{m:02d}:{s:05.2f}"
+
+    def _report_progress(pct: int, current_s: float, speed_value: str = "0.0x", frame_no: int = 1) -> None:
+        if not progress_callback:
+            return
+        total_s = duration_s if duration_s is not None else 0.0
+        remaining_s = (total_s - current_s) if total_s and total_s > current_s else 0.0
+        time_str = _format_hhmmss(current_s)
+        try:
+            progress_callback(
+                pct,
+                current_s,
+                total_s,
+                speed_value,
+                remaining_s,
+                frame_no,  # frame
+                0.0,       # fps
+                0.0,       # q
+                0,         # size
+                time_str,
+                0.0,       # bitrate
+                media_file=video_file,
+            )
+        except TypeError:
+            # Older callback signature
+            try:
+                progress_callback(pct, current_s, total_s, speed_value, media_file=video_file)
+            except Exception:
+                pass
+
+    for idx, t in enumerate(chapter_offsets):
+        # Plex names chapter thumbnails as chapter1.jpg, chapter2.jpg, ... (1-indexed)
+        out_file = os.path.join(chapters_path, f"chapter{idx + 1}.jpg")
+
+        # When not regenerating, do not overwrite existing chapter thumbs.
+        if not config.regenerate_thumbnails and os.path.exists(out_file):
+            skipped_existing += 1
+            continue
+
+        # First attempt: same execution mode as the worker (GPU if provided)
+        effective_gpu = gpu
+        effective_gpu_device_path = gpu_device_path
+
+        # Offset by up to +1.0s, but never past usable EOF.
+        # For the last chapter (often placed at/near EOF), cap the offset to the remaining playable time.
+        ts = t + 1.0
+        use_sseof = False
+        if duration_s is not None and duration_s > 0:
+            usable_end = max(0.0, duration_s - duration_margin_s)
+            remaining = usable_end - t
+            # Only advance into the chapter if there is actually time left.
+            # If the chapter starts at/after usable_end, keep ts at usable_end.
+            if remaining <= 0:
+                ts = usable_end
+            else:
+                ts = t + min(1.0, remaining)
+            # Special-case: if this is the last chapter, prefer a safe seek-from-EOF.
+            if idx == (total - 1):
+                use_sseof = True
+        # Progress reporting after timestamp is computed/clamped
+        pct = int((idx / max(1, total)) * 100)
+        _report_progress(pct, ts, "0.0x", frame_no=idx + 1)
+        if duration_s is not None:
+            logger.debug(f"Generating chapter thumb {idx} at {ts:.3f}s (chapter {t:.3f}s +1.0s, duration {duration_s:.3f}s) -> {out_file}")
+        else:
+            logger.debug(f"Generating chapter thumb {idx} at {ts:.3f}s (chapter {t:.3f}s +1.0s) -> {out_file}")
+        cmd = _build_ffmpeg_args(allow_skip, effective_gpu, effective_gpu_device_path, ts, out_file, use_sseof=use_sseof)
+
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        except Exception as e:
+            logger.error(f"FFmpeg failed for chapter {idx} at {ts:.3f}s: {type(e).__name__}: {e}")
+            failed += 1
+            continue
+
+        if result.returncode == 0:
+            written += 1
+            pct_done = int(((idx + 1) / max(1, total)) * 100)
+            _report_progress(pct_done, ts, "1.0x", frame_no=idx + 1)
+            continue
+
+        stderr_lines = (result.stderr.decode(errors='ignore') or "").splitlines()
+
+        # If GPU was requested and we hit a codec/hw decoder error, signal the worker pool
+        # so it can re-queue this item to a CPU worker, mirroring preview generation behavior.
+        if gpu is not None and _detect_codec_error(result.returncode, stderr_lines):
+            logger.warning(
+                f"GPU chapter thumbnail generation failed with codec error (exit code {result.returncode}) for {video_file}; will hand off to CPU worker"
+            )
+            raise CodecNotSupportedError(
+                f"Codec not supported by GPU for chapter thumbs of {video_file} (exit code {result.returncode})"
+            )
+
+        # If we tried skip_frame and it failed, retry without skip_frame once.
+        if allow_skip:
+            cmd2 = _build_ffmpeg_args(False, effective_gpu, effective_gpu_device_path, ts, out_file, use_sseof=use_sseof)
+            try:
+                result2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            except Exception as e:
+                logger.error(f"FFmpeg retry failed for chapter {idx} at {ts:.3f}s: {type(e).__name__}: {e}")
+                failed += 1
+                continue
+            if result2.returncode == 0:
+                written += 1
+                pct_done = int(((idx + 1) / max(1, total)) * 100)
+                _report_progress(pct_done, ts, "1.0x", frame_no=idx + 1)
+                continue
+
+            stderr_lines2 = (result2.stderr.decode(errors='ignore') or "").splitlines()
+            if gpu is not None and _detect_codec_error(result2.returncode, stderr_lines2):
+                logger.warning(
+                    f"GPU chapter thumbnail generation failed with codec error after no-skip retry (exit code {result2.returncode}) for {video_file}; will hand off to CPU worker"
+                )
+                raise CodecNotSupportedError(
+                    f"Codec not supported by GPU for chapter thumbs of {video_file} (exit code {result2.returncode})"
+                )
+
+            logger.error(
+                f"FFmpeg returned {result2.returncode} for chapter {idx} at {ts:.3f}s (after retry): "
+                f"{result2.stderr.decode(errors='ignore')}"
+            )
+            failed += 1
+        else:
+            logger.error(
+                f"FFmpeg returned {result.returncode} for chapter {idx} at {ts:.3f}s: "
+                f"{result.stderr.decode(errors='ignore')}"
+            )
+            failed += 1
+
+    logger.info(
+        f"Generated Chapter Thumbnails for {video_file} WROTE={written} SKIPPED_EXISTING={skipped_existing} FAILED={failed}"
+    )
+
+    # Final progress callback
+    _report_progress(100, (duration_s if duration_s is not None else 0.0), "1.0x", frame_no=(total if total > 0 else 1))
+
+
+def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[str],
                 config: Config, plex, progress_callback=None) -> None:
     """
     Process a single media item: generate thumbnails and BIF file.
-    
+
     This is the core processing function that handles:
     - Plex API queries
     - Path mapping for remote generation
@@ -699,7 +1012,7 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
     - Thumbnail generation with FFmpeg
     - BIF file creation
     - Cleanup
-    
+
     Args:
         item_key: Plex media item key
         gpu: GPU type for acceleration
@@ -723,6 +1036,22 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
         logger.error(f"Error querying Plex for item {item_key}: {e}")
         return
 
+    try:
+        chapters_xml = retry_plex_call(plex.query, f'{item_key}?includeChapters=1')
+    except Exception as e:
+        logger.error(f"Error querying Plex for chapters of {item_key}: {e}")
+        chapters_xml = None
+
+    chapter_offsets = []
+    if chapters_xml is not None:
+        # Plex chapter offsets are in milliseconds
+        for ch in chapters_xml.findall('.//Chapter'):
+            try:
+                offset_ms = int(ch.attrib.get('startTimeOffset', '0'))
+            except ValueError:
+                continue
+            chapter_offsets.append(offset_ms / 1000.0)  # seconds as float
+
     for media_part in data.findall('.//MediaPart'):
         if 'hash' in media_part.attrib:
             bundle_hash = media_part.attrib['hash']
@@ -744,9 +1073,38 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
                 continue
 
             try:
-                indexes_path, index_bif, tmp_path = _setup_bundle_paths(bundle_hash, config)
+                indexes_path, index_bif, tmp_path, chapters_path = _setup_bundle_paths(bundle_hash, config)
             except Exception as e:
                 logger.error(f'Error generating bundle_file for {media_file} due to {type(e).__name__}:{str(e)}')
+                continue
+
+            # Parse MediaInfo once per media file to avoid redundant scans.
+            media_info = None
+            try:
+                media_info = MediaInfo.parse(media_file)
+            except Exception as e:
+                logger.warning(
+                    f"MediaInfo parse failed for {media_file}; proceeding without cached metadata: {type(e).__name__}: {e}"
+                )
+                media_info = None
+
+            # New: chapter thumbnails (mirror the same GPU/CPU routing as preview generation)
+            try:
+                generate_chapter_thumbnails(
+                    media_file,
+                    chapter_offsets,
+                    chapters_path,
+                    gpu,
+                    gpu_device_path,
+                    config,
+                    progress_callback,
+                    media_info=media_info,
+                )
+            except CodecNotSupportedError:
+                # Re-raise so worker can handle codec errors consistently
+                raise
+            except Exception as e:
+                logger.error(f"Error generating chapter thumbnails for {media_file}: {type(e).__name__}: {e}")
                 continue
 
             if os.path.isfile(index_bif) and config.regenerate_thumbnails:
@@ -766,8 +1124,8 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
 
                 # Generate images and create BIF file
                 try:
-                    _generate_and_save_bif(media_file, tmp_path, index_bif, gpu, gpu_device_path, 
-                                          config, progress_callback)
+                    _generate_and_save_bif(media_file, tmp_path, index_bif, gpu, gpu_device_path,
+                                          config, progress_callback, media_info=media_info)
                 except CodecNotSupportedError:
                     # Re-raise so worker can handle codec errors
                     raise

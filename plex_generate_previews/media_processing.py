@@ -715,10 +715,6 @@ def generate_chapter_thumbnails(
         config: Configuration object
         progress_callback: Optional callback for progress reporting
     """
-    if not chapter_offsets:
-        logger.debug(f"No chapters found for {video_file}; skipping chapter thumbnails")
-        return
-
     # Ensure directory
     try:
         os.makedirs(chapters_path, exist_ok=True)
@@ -745,8 +741,17 @@ def generate_chapter_thumbnails(
             logger.error(
                 f"Chapter thumbnails: error {type(e).__name__} while deleting existing thumbnails for {video_file}: {e}"
             )
+        # Also remove the no-chapters marker so future runs will re-check chapters.
+        marker = os.path.join(chapters_path, ".no_chapters")
+        try:
+            if os.path.exists(marker):
+                os.remove(marker)
+        except Exception:
+            pass
 
-
+    if not chapter_offsets:
+        logger.debug(f"No chapters found for {video_file}; skipping chapter thumbnails")
+        return
     if media_info is None:
         media_info = MediaInfo.parse(video_file)
 
@@ -1036,21 +1041,31 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
         logger.error(f"Error querying Plex for item {item_key}: {e}")
         return
 
-    try:
-        chapters_xml = retry_plex_call(plex.query, f'{item_key}?includeChapters=1')
-    except Exception as e:
-        logger.error(f"Error querying Plex for chapters of {item_key}: {e}")
-        chapters_xml = None
+    # Lazy chapter retrieval: only query Plex for chapters if we actually need to generate chapter thumbnails.
+    _chapter_offsets_cache: Optional[List[float]] = None
 
-    chapter_offsets = []
-    if chapters_xml is not None:
+    def _get_chapter_offsets() -> List[float]:
+        nonlocal _chapter_offsets_cache
+        if _chapter_offsets_cache is not None:
+            return _chapter_offsets_cache
+        try:
+            chapters_xml = retry_plex_call(plex.query, f'{item_key}?includeChapters=1')
+        except Exception as e:
+            logger.error(f"Error querying Plex for chapters of {item_key}: {e}")
+            _chapter_offsets_cache = []
+            return _chapter_offsets_cache
+
+        offsets: List[float] = []
         # Plex chapter offsets are in milliseconds
         for ch in chapters_xml.findall('.//Chapter'):
             try:
                 offset_ms = int(ch.attrib.get('startTimeOffset', '0'))
             except ValueError:
                 continue
-            chapter_offsets.append(offset_ms / 1000.0)  # seconds as float
+            offsets.append(offset_ms / 1000.0)
+
+        _chapter_offsets_cache = offsets
+        return _chapter_offsets_cache
 
     for media_part in data.findall('.//MediaPart'):
         if 'hash' in media_part.attrib:
@@ -1078,7 +1093,52 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
                 logger.error(f'Error generating bundle_file for {media_file} due to {type(e).__name__}:{str(e)}')
                 continue
 
-            # Parse MediaInfo once per media file to avoid redundant scans.
+            # Fast gating: decide whether we need to do any work before expensive MediaInfo parsing.
+            needs_chapters = bool(config.regenerate_thumbnails)
+            needs_previews = bool(config.regenerate_thumbnails)
+
+            # Chapter thumbnails gating:
+            # - If chapter1.* exists, assume chapter thumbs already exist.
+            # - If .no_chapters marker exists, assume this item has no chapters and skip further work.
+            chapter_thumb_exists = False
+            no_chapters_marker = os.path.join(chapters_path, ".no_chapters")
+            no_chapters_known = False
+            if not config.regenerate_thumbnails:
+                try:
+                    no_chapters_known = os.path.exists(no_chapters_marker)
+                except Exception:
+                    no_chapters_known = False
+                if not no_chapters_known:
+                    try:
+                        chapter_thumb_exists = any(
+                            os.path.exists(os.path.join(chapters_path, name))
+                            for name in ("chapter1.jpg", "chapter1.jpeg", "chapter1.JPG", "chapter1.JPEG")
+                        )
+                    except Exception:
+                        chapter_thumb_exists = False
+
+            # If we know there are no chapters, do not attempt generation.
+            if no_chapters_known:
+                needs_chapters = False
+            elif not chapter_thumb_exists:
+                needs_chapters = True
+
+            # Preview thumbnails (BIF): skip when index-sd.bif exists (unless regenerating)
+            bif_exists = False
+            if not config.regenerate_thumbnails:
+                try:
+                    bif_exists = os.path.exists(index_bif)
+                except Exception:
+                    bif_exists = False
+            if not bif_exists:
+                needs_previews = True
+
+            # If nothing to do, skip this media part without MediaInfo parsing.
+            if (not needs_chapters) and (not needs_previews):
+                logger.debug(f"No thumbnails needed for {media_file}; skipping")
+                continue
+
+            # Parse MediaInfo once per media file, but only when generation is needed.
             media_info = None
             try:
                 media_info = MediaInfo.parse(media_file)
@@ -1088,55 +1148,69 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
                 )
                 media_info = None
 
-            # New: chapter thumbnails (mirror the same GPU/CPU routing as preview generation)
-            try:
-                generate_chapter_thumbnails(
-                    media_file,
-                    chapter_offsets,
-                    chapters_path,
-                    gpu,
-                    gpu_device_path,
-                    config,
-                    progress_callback,
-                    media_info=media_info,
-                )
-            except CodecNotSupportedError:
-                # Re-raise so worker can handle codec errors consistently
-                raise
-            except Exception as e:
-                logger.error(f"Error generating chapter thumbnails for {media_file}: {type(e).__name__}: {e}")
-                continue
+            # Chapter thumbnails generation logic using needs_chapters
+            if not needs_chapters:
+                # Either chapter thumbs exist or we've previously determined this item has no chapters.
+                if not config.regenerate_thumbnails and no_chapters_known:
+                    logger.debug(f"No chapters previously recorded for {media_file}; skipping chapter thumbnails")
+                else:
+                    logger.debug(f"Chapter thumbnails already exist for {media_file}; skipping generation")
+            else:
+                # Query Plex for chapter offsets only when we actually intend to generate chapter thumbnails.
+                chapter_offsets = _get_chapter_offsets()
 
-            if os.path.isfile(index_bif) and config.regenerate_thumbnails:
-                logger.debug(f'Deleting existing BIF file at {index_bif} to regenerate thumbnails for {media_file}')
-                try:
-                    os.remove(index_bif)
-                except Exception as e:
-                    logger.error(f'Error {type(e).__name__} deleting index file {media_file}: {str(e)}')
-                    continue
+                # If Plex reports no chapters, persist a marker to avoid repeated lookups on future runs.
+                if not chapter_offsets and not config.regenerate_thumbnails:
+                    try:
+                        os.makedirs(chapters_path, exist_ok=True)
+                        with open(no_chapters_marker, "w", encoding="utf-8") as f:
+                            f.write("no_chapters\n")
+                        logger.debug(f"No chapters for {media_file}; wrote marker {no_chapters_marker}")
+                    except Exception as e:
+                        logger.debug(f"Failed to write no-chapters marker for {media_file}: {type(e).__name__}: {e}")
+                else:
+                    try:
+                        generate_chapter_thumbnails(
+                            media_file,
+                            chapter_offsets,
+                            chapters_path,
+                            gpu,
+                            gpu_device_path,
+                            config,
+                            progress_callback,
+                            media_info=media_info,
+                        )
+                    except CodecNotSupportedError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"Error generating chapter thumbnails for {media_file}: {type(e).__name__}: {e}")
+                        # Continue to preview generation even if chapter thumbs fail.
 
-            if not os.path.isfile(index_bif):
-                logger.debug(f'Generating thumbnails for {media_file} -> {index_bif}')
-
-                # Ensure directories exist
+            # Preview/BIF generation logic using needs_previews
+            if not needs_previews:
+                logger.debug(f"Preview thumbnails already exist for {media_file}; skipping generation")
+            else:
+                # Ensure directories before generating previews
                 if not _ensure_directories(indexes_path, tmp_path, media_file):
                     continue
-
-                # Generate images and create BIF file
+                # If BIF exists and not regenerating, skip (should almost never trigger here)
+                if os.path.exists(index_bif) and not config.regenerate_thumbnails:
+                    logger.debug(f"BIF file already exists for {media_file}; skipping preview generation")
+                    continue
                 try:
-                    _generate_and_save_bif(media_file, tmp_path, index_bif, gpu, gpu_device_path,
-                                          config, progress_callback, media_info=media_info)
+                    _generate_and_save_bif(
+                        media_file,
+                        tmp_path,
+                        index_bif,
+                        gpu,
+                        gpu_device_path,
+                        config,
+                        progress_callback,
+                        media_info=media_info,
+                    )
                 except CodecNotSupportedError:
-                    # Re-raise so worker can handle codec errors
                     raise
-                except RuntimeError as e:
-                    # RuntimeError from _generate_and_save_bif means generation failed
-                    # Log and continue to next media part
-                    logger.error(f'Error processing {media_file}: {str(e)}')
-                    continue
                 except Exception as e:
-                    logger.error(f'Error processing {media_file}: {type(e).__name__}: {str(e)}')
-                    continue
+                    logger.error(f"Error generating preview thumbnails for {media_file}: {type(e).__name__}: {e}")
                 finally:
-                    # Always clean up temp directory (may already be cleaned up by _generate_and_save_bif)
                     _cleanup_temp_directory(tmp_path)

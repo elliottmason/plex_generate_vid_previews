@@ -848,7 +848,7 @@ def generate_chapter_thumbnails(
         if use_sseof:
             # Half a second before EOF is usually safe even when the final chapter is exactly at the end.
             args += [
-                "-sseof", "-0.5",
+                "-sseof", "-3.0",
                 "-i", video_file,
             ]
         else:
@@ -922,7 +922,7 @@ def generate_chapter_thumbnails(
         effective_gpu_device_path = gpu_device_path
 
         # Offset by up to +1.0s, but never past usable EOF.
-        # For the last chapter (often placed at/near EOF), cap the offset to the remaining playable time.
+        # For chapters near/at EOF, avoid seeking past the end.
         ts = t + 1.0
         use_sseof = False
         if duration_s is not None and duration_s > 0:
@@ -934,16 +934,19 @@ def generate_chapter_thumbnails(
                 ts = usable_end
             else:
                 ts = t + min(1.0, remaining)
-            # Special-case: if this is the last chapter, prefer a safe seek-from-EOF.
+
+            # Last-chapter handling:
+            # - Use -sseof when the chapter is effectively at the very end, to avoid EOF seek errors.
             if idx == (total - 1):
-                use_sseof = True
+                if remaining <= 3.0:
+                    use_sseof = True
         # Progress reporting after timestamp is computed/clamped
         pct = int((idx / max(1, total)) * 100)
         _report_progress(pct, ts, "0.0x", frame_no=idx + 1)
         if duration_s is not None:
-            logger.debug(f"Generating chapter thumb {idx} at {ts:.3f}s (chapter {t:.3f}s +1.0s, duration {duration_s:.3f}s) -> {out_file}")
+            logger.debug(f"Generating chapter thumb {idx + 1} at {ts:.3f}s (chapter {t:.3f}s +1.0s, duration {duration_s:.3f}s) -> {out_file}")
         else:
-            logger.debug(f"Generating chapter thumb {idx} at {ts:.3f}s (chapter {t:.3f}s +1.0s) -> {out_file}")
+            logger.debug(f"Generating chapter thumb {idx + 1} at {ts:.3f}s (chapter {t:.3f}s +1.0s) -> {out_file}")
         cmd = _build_ffmpeg_args(allow_skip, effective_gpu, effective_gpu_device_path, ts, out_file, use_sseof=use_sseof)
 
         try:

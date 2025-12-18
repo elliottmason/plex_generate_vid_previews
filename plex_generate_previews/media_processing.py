@@ -741,11 +741,22 @@ def generate_chapter_thumbnails(
             logger.error(
                 f"Chapter thumbnails: error {type(e).__name__} while deleting existing thumbnails for {video_file}: {e}"
             )
+
         # Also remove the no-chapters marker so future runs will re-check chapters.
         marker = os.path.join(chapters_path, ".no_chapters")
         try:
             if os.path.exists(marker):
                 os.remove(marker)
+        except Exception:
+            pass
+
+        # Remove any chapter-count marker(s) so we can recompute expected chapter count.
+        try:
+            for p in glob.glob(os.path.join(chapters_path, ".chapters_*")):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1098,29 +1109,91 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
             needs_previews = bool(config.regenerate_thumbnails)
 
             # Chapter thumbnails gating:
-            # - If chapter1.* exists, assume chapter thumbs already exist.
             # - If .no_chapters marker exists, assume this item has no chapters and skip further work.
-            chapter_thumb_exists = False
+            # - Prefer a cheap completeness check using a chapter-count marker file: .chapters_<N>
+            #   If it exists, we only need to check for chapter<N>.* to consider the set complete.
+            # - If only chapter1.* exists (legacy state), we will query Plex once to learn the chapter
+            #   count, write the marker, and then fill any missing thumbnails.
             no_chapters_marker = os.path.join(chapters_path, ".no_chapters")
             no_chapters_known = False
+
+            def _chapter_thumb_path(idx: int) -> Optional[str]:
+                # Return the first matching existing chapter thumb path for chapter<idx>.*
+                names = (
+                    f"chapter{idx}.jpg", f"chapter{idx}.jpeg",
+                    f"chapter{idx}.JPG", f"chapter{idx}.JPEG",
+                )
+                for n in names:
+                    p = os.path.join(chapters_path, n)
+                    if os.path.exists(p):
+                        return p
+                return None
+
+            def _read_chapter_count_marker() -> Optional[int]:
+                try:
+                    markers = glob.glob(os.path.join(chapters_path, ".chapters_*"))
+                except Exception:
+                    markers = []
+                if not markers:
+                    return None
+                # If multiple exist, prefer the one with the largest numeric suffix.
+                best = None
+                best_n = None
+                for m in markers:
+                    base = os.path.basename(m)
+                    m2 = re.match(r"^\.chapters_(\d+)$", base)
+                    if not m2:
+                        continue
+                    n = int(m2.group(1))
+                    if best_n is None or n > best_n:
+                        best_n = n
+                        best = m
+                return best_n
+
+            def _write_chapter_count_marker(n: int) -> None:
+                # Remove any existing markers and write a single .chapters_<n> marker.
+                try:
+                    for p in glob.glob(os.path.join(chapters_path, ".chapters_*")):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    os.makedirs(chapters_path, exist_ok=True)
+                    marker_path = os.path.join(chapters_path, f".chapters_{n}")
+                    with open(marker_path, "w", encoding="utf-8") as f:
+                        f.write(f"chapters={n}\n")
+                except Exception as e:
+                    logger.debug(f"Failed to write chapter-count marker for {media_file}: {type(e).__name__}: {e}")
+
+            chapter_count_marker = None
+            chapter_set_complete = False
+            legacy_chapter1_exists = False
+
             if not config.regenerate_thumbnails:
                 try:
                     no_chapters_known = os.path.exists(no_chapters_marker)
                 except Exception:
                     no_chapters_known = False
+
                 if not no_chapters_known:
-                    try:
-                        chapter_thumb_exists = any(
-                            os.path.exists(os.path.join(chapters_path, name))
-                            for name in ("chapter1.jpg", "chapter1.jpeg", "chapter1.JPG", "chapter1.JPEG")
-                        )
-                    except Exception:
-                        chapter_thumb_exists = False
+                    chapter_count_marker = _read_chapter_count_marker()
+                    if chapter_count_marker is not None and chapter_count_marker > 0:
+                        # Consider complete only if the last expected thumbnail exists.
+                        chapter_set_complete = _chapter_thumb_path(chapter_count_marker) is not None
+                    else:
+                        # Legacy heuristic: chapter1 exists but we don't know expected count.
+                        legacy_chapter1_exists = _chapter_thumb_path(1) is not None
 
             # If we know there are no chapters, do not attempt generation.
             if no_chapters_known:
                 needs_chapters = False
-            elif not chapter_thumb_exists:
+            elif chapter_set_complete:
+                needs_chapters = False
+            else:
+                # Either no thumbs, or partial/missing, or legacy state without a marker.
                 needs_chapters = True
 
             # Preview thumbnails (BIF): skip when index-sd.bif exists (unless regenerating)
@@ -1169,6 +1242,13 @@ def process_item(item_key: str, gpu: Optional[str], gpu_device_path: Optional[st
                     except Exception as e:
                         logger.debug(f"Failed to write no-chapters marker for {media_file}: {type(e).__name__}: {e}")
                 else:
+                    # Persist expected chapter count so future runs can cheaply detect completeness.
+                    # This also allows gap-filling when only some chapter*.jpg exist.
+                    if not config.regenerate_thumbnails:
+                        try:
+                            _write_chapter_count_marker(len(chapter_offsets))
+                        except Exception:
+                            pass
                     try:
                         generate_chapter_thumbnails(
                             media_file,
